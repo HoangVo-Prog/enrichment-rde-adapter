@@ -7,6 +7,9 @@ import logging
 
 
 def rank(similarity, q_pids, g_pids, max_rank=10, get_mAP=True):
+    q_pids = q_pids.to(similarity.device)
+    g_pids = g_pids.to(similarity.device)
+
     if get_mAP:
         indices = torch.argsort(similarity, dim=1, descending=True)
     else:
@@ -83,14 +86,18 @@ class Evaluator():
         similarity = qfeats @ gfeats.t()
 
         t2i_cmc, t2i_mAP, t2i_mINP, _ = rank(similarity=similarity, q_pids=qids, g_pids=gids, max_rank=10, get_mAP=True)
-        t2i_cmc, t2i_mAP, t2i_mINP = t2i_cmc.numpy(), t2i_mAP.numpy(), t2i_mINP.numpy()
+        t2i_cmc = t2i_cmc.detach().cpu().numpy()
+        t2i_mAP = t2i_mAP.detach().cpu().numpy()
+        t2i_mINP = t2i_mINP.detach().cpu().numpy()
         table = PrettyTable(["task", "R1", "R5", "R10", "mAP", "mINP"])
         table.add_row(['t2i', t2i_cmc[0], t2i_cmc[4], t2i_cmc[9], t2i_mAP, t2i_mINP])
 
         if i2t_metric:
             i2t_cmc, i2t_mAP, i2t_mINP, _ = rank(similarity=similarity.t(), q_pids=gids, g_pids=qids, max_rank=10,
                                                  get_mAP=True)
-            i2t_cmc, i2t_mAP, i2t_mINP = i2t_cmc.numpy(), i2t_mAP.numpy(), i2t_mINP.numpy()
+            i2t_cmc = i2t_cmc.detach().cpu().numpy()
+            i2t_mAP = i2t_mAP.detach().cpu().numpy()
+            i2t_mINP = i2t_mINP.detach().cpu().numpy()
             table.add_row(['i2t', i2t_cmc[0], i2t_cmc[4], i2t_cmc[9], i2t_mAP, i2t_mINP])
         # table.float_format = '.4'
         table.custom_format["R1"] = lambda f, v: f"{v:.3f}"
