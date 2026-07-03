@@ -22,8 +22,9 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
     arguments["num_epoch"] = num_epoch
     arguments["iteration"] = 0
 
-    logger = logging.getLogger("dm-adapter.train")
+    logger = logging.getLogger("IRRA.train")
     logger.info('start training')
+    logger.info(f"training loader contains {len(train_loader)} batches per epoch")
 
     meters = {
         "loss": AverageMeter(),
@@ -51,6 +52,7 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
         for meter in meters.values():
             meter.reset()
         model.train()
+        logger.info(f"Epoch[{epoch}/{num_epoch}] started")
 
         for n_iter, batch in enumerate(train_loader):
             batch = {k: v.to(device) for k, v in batch.items()}
@@ -123,7 +125,7 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
 
 
 def do_inference(model, test_img_loader, test_txt_loader):
-    logger = logging.getLogger("dm-adapter.test")
+    logger = logging.getLogger("IRRA.test")
     logger.info("Enter inferencing")
 
     evaluator = Evaluator(test_img_loader, test_txt_loader)

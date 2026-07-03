@@ -6,25 +6,34 @@ import pickle as pkl
 import os
 import os.path as osp
 import yaml
+import time
 from easydict import EasyDict as edict
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
-def read_image(img_path):
+def read_image(img_path, max_retries=10, retry_delay=0.1):
     """Keep reading image until succeed.
     This can avoid IOError incurred by heavy IO process."""
-    got_img = False
     if not osp.exists(img_path):
         raise IOError("{} does not exist".format(img_path))
-    while not got_img:
+
+    for attempt in range(1, max_retries + 1):
         try:
-            img = Image.open(img_path).convert('RGB')
-            got_img = True
-        except IOError:
-            print("IOError incurred when reading '{}'. Will redo. Don't worry. Just chill.".format(img_path))
-            pass
-    return img
+            return Image.open(img_path).convert('RGB')
+        except IOError as err:
+            if attempt == max_retries:
+                raise IOError(
+                    "Failed to read image '{}' after {} attempts".format(
+                        img_path, max_retries
+                    )
+                ) from err
+            print(
+                "IOError incurred when reading '{}'. Retry {}/{}.".format(
+                    img_path, attempt, max_retries
+                )
+            )
+            time.sleep(retry_delay)
 
 
 def mkdir_if_missing(directory):

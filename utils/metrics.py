@@ -46,7 +46,7 @@ class Evaluator():
     def __init__(self, img_loader, txt_loader):
         self.img_loader = img_loader  # gallery
         self.txt_loader = txt_loader  # query
-        self.logger = logging.getLogger("dm-adapter.eval")
+        self.logger = logging.getLogger("IRRA.eval")
 
     def _compute_embedding(self, model):
         model = model.eval()
