@@ -8,7 +8,6 @@ from torch.utils.tensorboard import SummaryWriter
 from prettytable import PrettyTable
 import numpy as np
 import copy
-from pynvml import *
 
 
 
@@ -120,7 +119,6 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
                     # checkpointer.save("best", **arguments)
     if get_rank() == 0:
         logger.info(f"best R1: {best_top1} at epoch {arguments['epoch']}")
-    nvmlShutdown()
 
 
 
