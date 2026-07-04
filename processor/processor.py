@@ -44,6 +44,7 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
     tb_writer = SummaryWriter(log_dir=args.output_dir)
 
     best_top1 = 0.0
+    best_epoch = None
 
     # train
     for epoch in range(start_epoch, num_epoch + 1):
@@ -113,12 +114,18 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
                     top1 = evaluator.eval(model.eval())
 
                 torch.cuda.empty_cache()
+                top1 = float(top1)
                 if best_top1 < top1:
                     best_top1 = top1
+                    best_epoch = epoch
                     arguments["epoch"] = epoch
-                    # checkpointer.save("best", **arguments)
+                    arguments["best_top1"] = best_top1
+                    checkpointer.save("best", **arguments)
     if get_rank() == 0:
-        logger.info(f"best R1: {best_top1} at epoch {arguments['epoch']}")
+        if best_epoch is None:
+            logger.info("No validation results were produced; best checkpoint was not saved.")
+        else:
+            logger.info(f"best R1: {best_top1} at epoch {best_epoch}")
 
 
 
