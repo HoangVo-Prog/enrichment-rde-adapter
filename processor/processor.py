@@ -7,6 +7,7 @@ from torch.utils.tensorboard import SummaryWriter
 from utils.comm import get_rank, synchronize
 from utils.meter import AverageMeter
 from utils.metrics import Evaluator
+from utils.wandb_utils import log_wandb
 
 
 def _scalar_value(value):
@@ -27,7 +28,11 @@ def _is_loss_key(key):
     return key == "loss" or key.endswith("_loss")
 
 
-def _should_track_scalar(key):
+def _should_track_log_scalar(key):
+    return "loss" in key or key.endswith("grad_norm")
+
+
+def _should_track_wandb_scalar(key):
     return (
         "loss" in key
         or key.endswith("grad_norm")
@@ -113,6 +118,13 @@ def _unwrap_model(model):
     return model.module if hasattr(model, "module") else model
 
 
+def _set_wandb_summary(wandb_run, summary_values):
+    if wandb_run is None or not hasattr(wandb_run, "summary"):
+        return
+    for key, value in summary_values.items():
+        wandb_run.summary[key] = int(value)
+
+
 def _count_module_tensors(module, name_filter=None):
     def _include(name):
         return name_filter is None or name_filter(name)
@@ -155,7 +167,16 @@ def _log_param_scope(logger, label, stats):
     )
 
 
-def _log_enrichment_branch_size(model, logger):
+def _flatten_param_summary(prefix, stats):
+    return {
+        f"{prefix}_total_params": stats["total_params"],
+        f"{prefix}_trainable_params": stats["trainable_params"],
+        f"{prefix}_frozen_params": stats["frozen_params"],
+        f"{prefix}_buffers": stats["buffers"],
+    }
+
+
+def _log_enrichment_branch_size(model, logger, wandb_run=None):
     model = _unwrap_model(model)
     target_enricher = getattr(model, "target_enricher", None)
     model_stats = _count_module_tensors(model)
@@ -163,17 +184,27 @@ def _log_enrichment_branch_size(model, logger):
         model,
         name_filter=lambda name: not name.startswith("target_enricher."),
     )
+    summary = {}
+    summary.update(_flatten_param_summary("model", model_stats))
+    summary.update(_flatten_param_summary("host", host_stats))
+
     _log_param_scope(logger, "Model", model_stats)
     _log_param_scope(logger, "Host", host_stats)
 
     if target_enricher is None:
         logger.info("Target enrichment branch params: disabled")
+        summary.update(_flatten_param_summary("target_enrichment_branch", {
+            "total_params": 0,
+            "trainable_params": 0,
+            "frozen_params": 0,
+            "buffers": 0,
+        }))
+        _set_wandb_summary(wandb_run, summary)
         return
-    _log_param_scope(
-        logger,
-        "Target enrichment branch",
-        _count_module_tensors(target_enricher),
-    )
+    target_stats = _count_module_tensors(target_enricher)
+    _log_param_scope(logger, "Target enrichment branch", target_stats)
+    summary.update(_flatten_param_summary("target_enrichment_branch", target_stats))
+    _set_wandb_summary(wandb_run, summary)
 
 
 def _target_enrichment_active(args, epoch):
@@ -191,7 +222,7 @@ def _should_run_eval(args, epoch):
 
 
 def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
-             scheduler, checkpointer, target_pool=None):
+             scheduler, checkpointer, target_pool=None, wandb_run=None):
     log_period = args.log_period
     eval_period = args.eval_period
     device = "cuda"
@@ -200,9 +231,8 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
 
     logger = logging.getLogger("IRRA.train")
     logger.info("start training")
-    logger.info(f"training loader contains {len(train_loader)} batches per epoch")
     if get_rank() == 0:
-        _log_enrichment_branch_size(model, logger)
+        _log_enrichment_branch_size(model, logger, wandb_run=wandb_run)
     if target_pool is not None and getattr(args, "enrichment_start", 1) > 1:
         logger.info(
             "Target enrichment delayed until epoch {}; earlier epochs use host training only".format(
@@ -227,22 +257,37 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
         "target_enrichment_loss_grad_norm": AverageMeter(),
         "target_retrieval_loss_grad_norm": AverageMeter(),
     }
+    wandb_meters = {}
 
     tb_writer = SummaryWriter(log_dir=args.output_dir)
     best_top1 = 0.0
     best_epoch = None
     current_steps = 0
+    now_top1 = 0.0
+
+    if _should_run_eval(args, 0):
+        initial_top1 = evaluator.eval(
+            model.eval(),
+            use_target_enrichment=_target_enrichment_active(args, start_epoch),
+        )
+        if get_rank() == 0:
+            initial_metrics = dict(getattr(evaluator, "last_metrics", {}))
+            initial_metrics["eval/top_R1"] = initial_top1
+            if "eval/ablation_best_R1" in initial_metrics:
+                initial_metrics["eval/best_ablation_R1"] = initial_top1
+            log_wandb(wandb_run, initial_metrics, step=0, epoch=start_epoch - 1)
 
     for epoch in range(start_epoch, num_epoch + 1):
         start_time = time.time()
         for meter in meters.values():
+            meter.reset()
+        for meter in wandb_meters.values():
             meter.reset()
         model.train()
         _set_loader_epoch(train_loader, epoch)
         use_target_enrichment = target_pool is not None and _target_enrichment_active(args, epoch)
         if target_pool is not None and epoch == getattr(args, "enrichment_start", 1):
             logger.info("Target enrichment starts at epoch {}".format(epoch))
-        logger.info(f"Epoch[{epoch}/{num_epoch}] started")
 
         for n_iter, batch in enumerate(train_loader):
             current_steps += 1
@@ -280,14 +325,18 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
             if loss_scalar is None:
                 raise ValueError("Training forward must return a scalar loss")
             meters["loss"].update(loss_scalar, batch_size)
+            _update_meter(wandb_meters, "loss", loss_scalar, batch_size)
 
             for key, value in ret.items():
                 if key == "loss":
                     continue
                 scalar = _scalar_value(value)
-                if scalar is None or not _should_track_scalar(key):
+                if scalar is None:
                     continue
-                _update_meter(meters, key, scalar, batch_size)
+                if _should_track_log_scalar(key):
+                    _update_meter(meters, key, scalar, batch_size)
+                if _should_track_wandb_scalar(key):
+                    _update_meter(wandb_meters, key, scalar, batch_size)
 
             optimizer.zero_grad()
             trainable_params = [parameter for parameter in model.parameters() if parameter.requires_grad]
@@ -297,10 +346,12 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
                 grad_norm_key = f"{loss_key}_grad_norm"
                 grad_norm_value = _loss_grad_norm(loss_value, trainable_params)
                 _update_meter(meters, grad_norm_key, grad_norm_value, batch_size)
+                _update_meter(wandb_meters, grad_norm_key, grad_norm_value, batch_size)
 
             total_loss.backward()
             grad_norm_value = _grad_norm(model.parameters())
             meters["grad_norm"].update(grad_norm_value, batch_size)
+            _update_meter(wandb_meters, "grad_norm", grad_norm_value, batch_size)
             optimizer.step()
             synchronize()
 
@@ -311,6 +362,15 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
                         info_str += f", {key}: {meter.avg:.4f}"
                 info_str += f", Base Lr: {scheduler.get_lr()[0]:.2e}"
                 logger.info(info_str)
+                if get_rank() == 0:
+                    train_metrics = {
+                        "train/{}".format(key): meter.avg
+                        for key, meter in wandb_meters.items()
+                        if meter.count > 0
+                    }
+                    train_metrics["train/lr"] = scheduler.get_lr()[0]
+                    train_metrics["train/temperature"] = _scalar_value(ret.get("temperature"))
+                    log_wandb(wandb_run, train_metrics, step=current_steps, epoch=epoch)
 
         tb_writer.add_scalar("lr", scheduler.get_lr()[0], epoch)
         temperature = _scalar_value(ret.get("temperature"))
@@ -319,6 +379,15 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
         for key, meter in meters.items():
             if meter.count > 0:
                 tb_writer.add_scalar(key, meter.avg, epoch)
+        if get_rank() == 0:
+            epoch_metrics = {
+                "train_epoch/{}".format(key): meter.avg
+                for key, meter in wandb_meters.items()
+                if meter.count > 0
+            }
+            epoch_metrics["train_epoch/lr"] = scheduler.get_lr()[0]
+            epoch_metrics["train_epoch/temperature"] = temperature
+            log_wandb(wandb_run, epoch_metrics, step=current_steps, epoch=epoch)
 
         scheduler.step()
         if get_rank() == 0:
@@ -340,6 +409,13 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
                     eval_model,
                     use_target_enrichment=_target_enrichment_active(args, epoch),
                 )
+                now_top1 = max(now_top1, top1)
+                eval_metrics = dict(getattr(evaluator, "last_metrics", {}))
+                eval_metrics["eval/top_R1"] = top1
+                eval_metrics["eval/best_R1"] = now_top1
+                if "eval/ablation_best_R1" in eval_metrics:
+                    eval_metrics["eval/best_ablation_R1"] = now_top1
+                log_wandb(wandb_run, eval_metrics, step=current_steps, epoch=epoch)
                 torch.cuda.empty_cache()
                 top1 = float(top1)
                 if best_top1 < top1:
@@ -347,6 +423,9 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
                     best_epoch = epoch
                     arguments["epoch"] = epoch
                     arguments["best_top1"] = best_top1
+                    if wandb_run is not None:
+                        wandb_run.summary["best_R1"] = float(best_top1)
+                        wandb_run.summary["best_R1_row"] = str(getattr(evaluator, "last_best_task", ""))
                     checkpointer.save("best", **arguments)
 
     if get_rank() == 0:

@@ -30,6 +30,17 @@ def str2bool(value):
     raise argparse.ArgumentTypeError("Boolean value expected.")
 
 
+def finetune_clip_arg(value):
+    if isinstance(value, bool):
+        return value
+    normalized = value.lower()
+    if normalized in ("yes", "true", "t", "1", "y"):
+        return True
+    if normalized in ("no", "false", "f", "0", "n"):
+        return False
+    return value
+
+
 def parse_extractor_mode(value):
     if not isinstance(value, str):
         raise argparse.ArgumentTypeError("--extractor_mode must be a comma-separated string")
@@ -101,6 +112,9 @@ def get_args():
     parser.add_argument("--val_dataset", default="test")  # use val set when evaluate, if test use test set
     parser.add_argument("--resume", default=False, action='store_true')
     parser.add_argument("--resume_ckpt_file", default="", help='resume from ...')
+    parser.add_argument("--finetune_clip", nargs="?", const=True, default=False,
+                        type=finetune_clip_arg,
+                        help="fine-tune the CLIP/base_model backbone; optionally pass a compatible checkpoint path to load first")
 
     ######################## model general settings ########################
     parser.add_argument("--pretrain_choice", default='ViT-B/16')  # whether  use pretrained model
@@ -172,6 +186,17 @@ def get_args():
     parser.add_argument("--test_batch_size", type=int, default=512)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--test", dest='training', default=True, action='store_false')
+    wandb_group = parser.add_mutually_exclusive_group()
+    wandb_group.add_argument("--use_wandb", dest="use_wandb", action="store_true",
+                             help="enable automatic Weights & Biases logging")
+    wandb_group.add_argument("--no_wandb", dest="use_wandb", action="store_false",
+                             help="disable Weights & Biases logging")
+    parser.set_defaults(use_wandb=True)
+    parser.add_argument("--wandb_project", default="enrichment",
+                        help="Weights & Biases project name")
+    parser.add_argument("--delete_checkpoints_after_run", action="store_true", default=False,
+                        help="delete checkpoints produced in the run output directory after training finishes; "
+                             "when W&B is enabled, cleanup waits until checkpoint artifact upload succeeds")
 
     ######################## MOE #############################
     parser.add_argument("--num_experts", type=int, default=6)
@@ -263,6 +288,9 @@ def get_args():
 
     if args.seed < 0 or args.seed >= 2**32:
         parser.error("--seed must be in [0, 2**32)")
+    args.wandb_project = args.wandb_project.strip()
+    if not args.wandb_project:
+        parser.error("--wandb_project must not be empty")
     if args.eval_after_epoch < 0:
         parser.error("--eval_after_epoch must be a non-negative integer")
     if args.enrichment_start < 1:

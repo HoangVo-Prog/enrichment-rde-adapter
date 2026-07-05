@@ -45,6 +45,7 @@ def _ensure_target_enrichment_defaults(args):
     _set_default_attr(args, "lambda_ret", 1.0)
     _set_default_attr(args, "tau", 0.015)
     _set_default_attr(args, "freeze_host", False)
+    _set_default_attr(args, "finetune_clip", False)
     _set_default_attr(args, "use_host_loss", True)
     _set_default_attr(args, "lambda_host", 1.0)
     _set_default_attr(args, "extractor_mode", "global,horizontal")
