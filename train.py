@@ -13,6 +13,7 @@ from utils.iotools import save_train_configs
 from utils.logger import setup_logger
 from solver import build_optimizer, build_lr_scheduler
 from model import build_model
+from model.enrichment import TargetPoolManager
 from utils.metrics import Evaluator
 from utils.options import get_args
 from utils.comm import get_rank, synchronize
@@ -77,18 +78,19 @@ if __name__ == '__main__':
             broadcast_buffers=False,
         )
         
-    # frezze clip
-    name_no_update = ["base_model"]
-    for name, param in model.named_parameters():
-        if any(ntu in name for ntu in name_no_update):
-            param.requires_grad_(False)
-        else:
-            param.requires_grad_(True)
-            
-    name_update = ["adapter_mlp", "ln_3", "experts", "feed_forward", "ln_4", "param", "v2i_proj", "task_param"]
-    for name, param in model.named_parameters():
-        if any(ntu in name for ntu in name_update):
-            param.requires_grad_(True)
+    if not getattr(args, "freeze_host", False):
+        # frezze clip
+        name_no_update = ["base_model"]
+        for name, param in model.named_parameters():
+            if any(ntu in name for ntu in name_no_update):
+                param.requires_grad_(False)
+            else:
+                param.requires_grad_(True)
+
+        name_update = ["adapter_mlp", "ln_3", "experts", "feed_forward", "ln_4", "param", "v2i_proj", "task_param"]
+        for name, param in model.named_parameters():
+            if any(ntu in name for ntu in name_update):
+                param.requires_grad_(True)
 
     # Double check
     enabled = set()
@@ -110,10 +112,16 @@ if __name__ == '__main__':
 
     is_master = get_rank() == 0
     checkpointer = Checkpointer(model, optimizer, scheduler, args.output_dir, is_master)
-    evaluator = Evaluator(val_img_loader, val_txt_loader)
+    evaluator = Evaluator(val_img_loader, val_txt_loader, args)
 
     start_time = time.time()
-    top1 = evaluator.eval(model.eval())
+    top1 = evaluator.eval(
+        model.eval(),
+        use_target_enrichment=(
+            getattr(args, "target_enrichment", False)
+            and getattr(args, "enrichment_start", 1) <= 1
+        ),
+    )
     end_time = time.time()
     logger.info( "test done. Time: {:.3f}[s]".format(end_time-start_time))
 
@@ -123,4 +131,8 @@ if __name__ == '__main__':
         start_epoch = checkpoint['epoch']
 
 
-    do_train(start_epoch, args, model, train_loader, evaluator, optimizer, scheduler, checkpointer)
+    target_pool = None
+    if getattr(args, "target_enrichment", False):
+        target_pool = TargetPoolManager(train_loader.dataset, args, logger)
+
+    do_train(start_epoch, args, model, train_loader, evaluator, optimizer, scheduler, checkpointer, target_pool)

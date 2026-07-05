@@ -86,6 +86,7 @@ class ImageTextDataset(Dataset):
             'image_ids': image_id,
             'images': img,
             'caption_ids': tokens,
+            'index': index,
         }
 
         return ret
@@ -164,7 +165,8 @@ class ImageTextMLMDataset(Dataset):
             'images': img,
             'caption_ids': mlm_tokens,
             'mlm_ids': mlm_tokens,
-            'mlm_labels': mlm_labels
+            'mlm_labels': mlm_labels,
+            'index': index,
         }
 
         return ret

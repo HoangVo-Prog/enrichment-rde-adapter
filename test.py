@@ -31,4 +31,4 @@ if __name__ == '__main__':
     checkpointer = Checkpointer(model)
     checkpointer.load(f=op.join(args.output_dir, 'best.pth'))
     model.to(device)
-    do_inference(model, test_img_loader, test_txt_loader)
+    do_inference(model, test_img_loader, test_txt_loader, args)
