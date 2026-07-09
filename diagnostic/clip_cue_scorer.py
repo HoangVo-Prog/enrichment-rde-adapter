@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Sequence
+from typing import Dict, Iterable, Sequence
 
 import numpy as np
 import torch
@@ -22,6 +22,18 @@ class CueScorerOutput:
     affinities: dict[str, np.ndarray]
     prompts_by_cue: dict[str, list[str]]
 
+    @property
+    def scores(self) -> dict[str, np.ndarray]:
+        return self.affinities
+
+    @property
+    def prompts(self) -> dict[str, list[str]]:
+        return self.prompts_by_cue
+
+    @property
+    def image_features_shape(self) -> tuple[int, int]:
+        return (int(self.gallery_features.shape[0]), int(self.gallery_features.shape[1]))
+
 
 class OffTheShelfCLIPCueScorer:
     """Frozen CLIP scorer loaded without TBPS fine-tuned weights."""
@@ -34,23 +46,18 @@ class OffTheShelfCLIPCueScorer:
         logger: logging.Logger,
         prompt_templates: Sequence[str] = DEFAULT_PROMPT_TEMPLATES,
     ) -> None:
-        from model.clip_model import build_CLIP_from_openai_pretrained
+        from diagnostic.prototype_clip_model import build_CLIP_from_openai_pretrained
 
         self.model_name = model_name
         self.device = device
         self.prompt_templates = tuple(prompt_templates)
-        logger.info("Loading off-the-shelf CLIP cue scorer through dm-adapter CLIP builder: %s", model_name)
+        logger.info("Loading off-the-shelf CLIP cue scorer: %s", model_name)
         try:
-            self.model, self.base_cfg, state_dict = build_CLIP_from_openai_pretrained(
+            self.model, self.base_cfg = build_CLIP_from_openai_pretrained(
                 model_name,
                 repo_args.img_size,
                 repo_args.stride_size,
-                repo_args.num_experts,
-                repo_args.topk,
-                repo_args.reduction,
             )
-            self.model.load_param(state_dict)
-            self._neutralize_adapter_outputs()
         except Exception as exc:
             raise RuntimeError(
                 "Failed to load off-the-shelf CLIP cue scorer. "
@@ -63,16 +70,8 @@ class OffTheShelfCLIPCueScorer:
         for parameter in self.model.parameters():
             parameter.requires_grad_(False)
 
-    def _neutralize_adapter_outputs(self) -> None:
-        for module in self.model.modules():
-            up = getattr(module, "up", None)
-            if isinstance(up, torch.nn.Linear):
-                torch.nn.init.zeros_(up.weight)
-                if up.bias is not None:
-                    torch.nn.init.zeros_(up.bias)
-
     def _encode_text_tokens(self, tokens: torch.Tensor) -> torch.Tensor:
-        x, _ = self.model.encode_text(tokens.long().to(self.device), l_aux=0)
+        x, _ = self.model.encode_text(tokens.long().to(self.device))
         features = x[torch.arange(x.shape[0], device=x.device), tokens.to(self.device).argmax(dim=-1)]
         return F.normalize(features.float(), p=2, dim=1)
 
@@ -100,7 +99,7 @@ class OffTheShelfCLIPCueScorer:
         logger.info("Encoding %d gallery images with off-the-shelf CLIP cue scorer", len(img_loader.dataset))
         with torch.no_grad():
             for _, images in img_loader:
-                x, _ = self.model.encode_image(images.to(self.device), l_aux=0)
+                x, _ = self.model.encode_image(images.to(self.device))
                 image_features = x[:, 0, :].float()
                 features.append(F.normalize(image_features, p=2, dim=1).cpu())
         return torch.cat(features, dim=0)
